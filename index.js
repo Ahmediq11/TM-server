@@ -9,6 +9,7 @@ const rateLimit = require("express-rate-limit");
 const { body, validationResult } = require("express-validator");
 
 const app = express();
+app.set("trust proxy", 1);
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
