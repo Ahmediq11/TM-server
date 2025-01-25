@@ -11,7 +11,7 @@ const app = express();
 // origin: ["http://localhost:5000"
 app.use(
   cors({
-    origin: ["http://localhost:5000", "https://tm-client.vercel.app/"],
+    origin: ["https://tm-client.vercel.app/", "http://localhost:5000"],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
     optionsSuccessStatus: 200,
