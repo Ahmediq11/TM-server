@@ -5,47 +5,59 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const rateLimit = require("express-rate-limit");
+const { body, validationResult } = require("express-validator");
 
 const app = express();
 
-// origin: ["http://localhost:5000"
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+});
+
+app.use(limiter);
 app.use(
   cors({
-    origin: ["https://tm-client.vercel.app/", "http://localhost:5000"],
+    origin: ["https://tm-client.vercel.app", "http://localhost:3000"],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
-    optionsSuccessStatus: 200,
   })
 );
 app.use(express.json());
 
-// MongoDB Models
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-});
+const userSchema = new mongoose.Schema(
+  {
+    username: { type: String, required: true, unique: true },
+    email: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+  },
+  {
+    timestamps: true,
+    versionKey: "__v",
+  }
+);
 
-const taskSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  title: { type: String, required: true },
-  completed: { type: Boolean, default: false },
-  created_at: { type: Date, default: Date.now },
-});
+const taskSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    title: { type: String, required: true },
+    completed: { type: Boolean, default: false },
+    created_at: { type: Date, default: Date.now },
+  },
+  {
+    timestamps: true,
+    versionKey: "__v",
+  }
+);
 
 const User = mongoose.model("User", userSchema);
 const Task = mongoose.model("Task", taskSchema);
 
-// Connect to MongoDB
 mongoose
-  .connect(process.env.MONGODB_URI, {
-    // useNewUrlParser: true,
-    // useUnifiedTopology: true,
-  })
+  .connect(process.env.MONGODB_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
@@ -61,9 +73,21 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Routes
-app.post("/api/register", async (req, res) => {
+const validateRegistration = [
+  body("username").trim().isLength({ min: 3 }).escape(),
+  body("email").isEmail().normalizeEmail(),
+  body("password").isLength({ min: 6 }),
+];
+
+const validateTask = [body("title").trim().isLength({ min: 1 }).escape()];
+
+app.post("/api/register", validateRegistration, async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const { username, email, password } = req.body;
     const existingUser = await User.findOne({ $or: [{ username }, { email }] });
 
@@ -77,6 +101,7 @@ app.post("/api/register", async (req, res) => {
     await new User({ username, email, password: hashedPassword }).save();
     res.status(201).json({ message: "Registration successful" });
   } catch (error) {
+    console.error("Registration error:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -98,6 +123,7 @@ app.post("/api/login", async (req, res) => {
 
     res.json({ token });
   } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -109,12 +135,18 @@ app.get("/api/tasks", authenticateToken, async (req, res) => {
     });
     res.json(tasks);
   } catch (error) {
+    console.error("Fetch tasks error:", error);
     res.status(500).json({ message: "Error fetching tasks" });
   }
 });
 
-app.post("/api/tasks", authenticateToken, async (req, res) => {
+app.post("/api/tasks", [authenticateToken, validateTask], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const taskCount = await Task.countDocuments({ userId: req.user.userId });
     if (taskCount >= 10) {
       return res.status(400).json({ message: "Task limit reached (max 10)" });
@@ -127,6 +159,7 @@ app.post("/api/tasks", authenticateToken, async (req, res) => {
 
     res.status(201).json({ id: task._id, message: "Task created" });
   } catch (error) {
+    console.error("Create task error:", error);
     res.status(500).json({ message: "Error creating task" });
   }
 });
@@ -142,6 +175,7 @@ app.patch("/api/tasks/:id", authenticateToken, async (req, res) => {
     if (!task) return res.status(404).json({ message: "Task not found" });
     res.json({ message: "Task updated" });
   } catch (error) {
+    console.error("Update task error:", error);
     res.status(500).json({ message: "Error updating task" });
   }
 });
@@ -156,6 +190,7 @@ app.delete("/api/tasks/:id", authenticateToken, async (req, res) => {
     if (!task) return res.status(404).json({ message: "Task not found" });
     res.json({ message: "Task deleted" });
   } catch (error) {
+    console.error("Delete task error:", error);
     res.status(500).json({ message: "Error deleting task" });
   }
 });
