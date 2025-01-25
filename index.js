@@ -85,6 +85,10 @@ const validateRegistration = [
 
 const validateTask = [body("title").trim().isLength({ min: 1 }).escape()];
 
+app.get("/", (req, res) => {
+  res.json({ message: "Server is running" });
+});
+
 app.post("/api/register", validateRegistration, async (req, res) => {
   try {
     const errors = validationResult(req);
