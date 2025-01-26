@@ -22,6 +22,7 @@ app.use(
     origin: ["https://tm-client.vercel.app", "http://localhost:3000"],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 app.use(express.json());
