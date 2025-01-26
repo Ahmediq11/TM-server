@@ -7,16 +7,31 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
 const { body, validationResult } = require("express-validator");
+const crypto = require("crypto");
 
 const app = express();
 app.set("trust proxy", 1);
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+// Rate limiting per user
+const createAccountLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour window
+  max: 5, // start blocking after 5 requests
+  message: "Too many accounts created, please try again after an hour",
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-app.use(limiter);
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.userId || req.ip, // Rate limit by user ID if authenticated, otherwise by IP
+});
+
+app.use("/api/register", createAccountLimiter);
+app.use("/api", apiLimiter);
+
 app.use(
   cors({
     origin: ["https://tm-client.vercel.app", "http://localhost:3000"],
@@ -27,10 +42,11 @@ app.use(
 );
 app.use(express.json());
 
+// Performance optimized schemas
 const userSchema = new mongoose.Schema(
   {
-    username: { type: String, required: true, unique: true },
-    email: { type: String, required: true, unique: true },
+    username: { type: String, required: true, unique: true, index: true },
+    email: { type: String, required: true, unique: true, index: true },
     password: { type: String, required: true },
   },
   {
@@ -41,10 +57,14 @@ const userSchema = new mongoose.Schema(
 
 const taskSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      index: true,
+    },
     title: { type: String, required: true },
-    completed: { type: Boolean, default: false },
-    created_at: { type: Date, default: Date.now },
+    completed: { type: Boolean, default: false, index: true },
+    created_at: { type: Date, default: Date.now, index: true },
   },
   {
     timestamps: true,
@@ -52,13 +72,23 @@ const taskSchema = new mongoose.Schema(
   }
 );
 
+// Add compound index for common queries
+taskSchema.index({ userId: 1, completed: 1, created_at: -1 });
+
 const User = mongoose.model("User", userSchema);
 const Task = mongoose.model("Task", taskSchema);
 
+// Configure MongoDB with performance optimizations
 mongoose
   .connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
+    connectTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 50,
+    minPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    heartbeatFrequencyMS: 10000,
   })
   .then(() => console.log("Connected to MongoDB"))
   .catch((err) => console.error("MongoDB connection error:", err));
@@ -86,6 +116,12 @@ const validateRegistration = [
 
 const validateTask = [body("title").trim().isLength({ min: 1 }).escape()];
 
+// Cache middleware
+const cacheControl = (maxAge) => (req, res, next) => {
+  res.set("Cache-Control", `private, max-age=${maxAge}`);
+  next();
+};
+
 app.get("/", (req, res) => {
   res.json({ message: "Server is running" });
 });
@@ -98,7 +134,9 @@ app.post("/api/register", validateRegistration, async (req, res) => {
     }
 
     const { username, email, password } = req.body;
-    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] })
+      .select("_id")
+      .lean();
 
     if (existingUser) {
       return res
@@ -118,7 +156,7 @@ app.post("/api/register", validateRegistration, async (req, res) => {
 app.post("/api/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-    const user = await User.findOne({ username });
+    const user = await User.findOne({ username }).select("+password").lean();
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ message: "Invalid credentials" });
@@ -137,11 +175,25 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-app.get("/api/tasks", authenticateToken, async (req, res) => {
+app.get("/api/tasks", authenticateToken, cacheControl(10), async (req, res) => {
   try {
-    const tasks = await Task.find({ userId: req.user.userId }).sort({
-      created_at: -1,
-    });
+    const tasks = await Task.find({ userId: req.user.userId })
+      .select("title completed created_at")
+      .sort({ created_at: -1 })
+      .lean();
+
+    // Generate ETag for caching
+    const etag = crypto
+      .createHash("md5")
+      .update(JSON.stringify(tasks))
+      .digest("hex");
+
+    // Return 304 if client's cache is valid
+    if (req.headers["if-none-match"] === etag) {
+      return res.status(304).send();
+    }
+
+    res.set("ETag", etag);
     res.json(tasks);
   } catch (error) {
     console.error("Fetch tasks error:", error);
@@ -150,13 +202,18 @@ app.get("/api/tasks", authenticateToken, async (req, res) => {
 });
 
 app.post("/api/tasks", [authenticateToken, validateTask], async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const taskCount = await Task.countDocuments({ userId: req.user.userId });
+    const taskCount = await Task.countDocuments({
+      userId: req.user.userId,
+    }).session(session);
     if (taskCount >= 10) {
       return res.status(400).json({ message: "Task limit reached (max 10)" });
     }
@@ -164,12 +221,16 @@ app.post("/api/tasks", [authenticateToken, validateTask], async (req, res) => {
     const task = await new Task({
       userId: req.user.userId,
       title: req.body.title,
-    }).save();
+    }).save({ session });
 
+    await session.commitTransaction();
     res.status(201).json({ id: task._id, message: "Task created" });
   } catch (error) {
+    await session.abortTransaction();
     console.error("Create task error:", error);
     res.status(500).json({ message: "Error creating task" });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -178,11 +239,11 @@ app.patch("/api/tasks/:id", authenticateToken, async (req, res) => {
     const task = await Task.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.userId },
       { completed: req.body.completed },
-      { new: true }
-    );
+      { new: true, lean: true }
+    ).select("completed");
 
     if (!task) return res.status(404).json({ message: "Task not found" });
-    res.json({ message: "Task updated" });
+    res.json({ message: "Task updated", task });
   } catch (error) {
     console.error("Update task error:", error);
     res.status(500).json({ message: "Error updating task" });
@@ -194,7 +255,7 @@ app.delete("/api/tasks/:id", authenticateToken, async (req, res) => {
     const task = await Task.findOneAndDelete({
       _id: req.params.id,
       userId: req.user.userId,
-    });
+    }).lean();
 
     if (!task) return res.status(404).json({ message: "Task not found" });
     res.json({ message: "Task deleted" });
