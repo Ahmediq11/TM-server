@@ -31,10 +31,13 @@ const apiLimiter = rateLimit({
 
 app.use("/api/register", createAccountLimiter);
 app.use("/api", apiLimiter);
-
+// "https://tm-client.vercel.app"
 app.use(
   cors({
-    origin: ["https://tm-client.vercel.app", "http://localhost:3000"],
+    origin: [
+      "tm-client-ahmeds-projects-eb34067d.vercel.app",
+      "http://localhost:3000",
+    ],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
