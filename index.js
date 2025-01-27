@@ -34,10 +34,7 @@ app.use("/api", apiLimiter);
 // "https://tm-client.vercel.app"
 app.use(
   cors({
-    origin: [
-      "tm-client-ahmeds-projects-eb34067d.vercel.app",
-      "http://localhost:3000",
-    ],
+    origin: ["https://tm-client.vercel.app", "http://localhost:3000"],
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
